@@ -35,4 +35,18 @@ return [
         ],
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Internal API (Server-to-Server Authentication)
+    |--------------------------------------------------------------------------
+    |
+    | Shared secret used by the realtime relay server to authenticate
+    | internal API calls (e.g., finalizing intake sessions).
+    |
+    */
+
+    'internal' => [
+        'secret' => env('INTERNAL_API_SECRET'),
+    ],
+
 ];
