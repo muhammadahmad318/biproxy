@@ -1,6 +1,10 @@
-import WebSocket from 'ws';
-import { Socket } from 'socket.io';
-import { LaravelApiClient, SessionContext, FinalizePayload } from './LaravelApiClient';
+import WebSocket from "ws";
+import { Socket } from "socket.io";
+import {
+  LaravelApiClient,
+  SessionContext,
+  FinalizePayload,
+} from "./LaravelApiClient";
 
 // ---------------------------------------------------------------------------
 // Gemini Multimodal Live API — Outbound Message Interfaces
@@ -58,7 +62,9 @@ interface GeminiFunctionDeclaration {
 /** Realtime audio input envelope. */
 interface GeminiRealtimeInput {
   realtimeInput: {
-    mediaChunks: GeminiInlineData[];
+    audio?: GeminiInlineData;
+    video?: GeminiInlineData;
+    text?: string;
   };
 }
 
@@ -128,8 +134,8 @@ export interface ExtendedSessionContext extends SessionContext {
 // GeminiRelayService
 // ---------------------------------------------------------------------------
 
-const GEMINI_MODEL = 'models/gemini-2.0-flash-live-001';
-const AUDIO_MIME_TYPE = 'audio/pcm;rate=16000';
+const GEMINI_MODEL = "models/gemini-3.1-flash-live-preview";
+const AUDIO_MIME_TYPE = "audio/pcm;rate=16000";
 
 /**
  * Manages a bidirectional WebSocket connection to the Google Gemini Multimodal Live API.
@@ -152,7 +158,11 @@ export class GeminiRelayService {
    * @param context - The session context fetched from Laravel.
    * @param laravelClient - The Laravel API client for finalization.
    */
-  constructor(socket: Socket, context: ExtendedSessionContext, laravelClient: LaravelApiClient) {
+  constructor(
+    socket: Socket,
+    context: ExtendedSessionContext,
+    laravelClient: LaravelApiClient,
+  ) {
     this.socket = socket;
     this.context = context;
     this.laravelClient = laravelClient;
@@ -168,20 +178,23 @@ export class GeminiRelayService {
     const apiKey = process.env.GEMINI_API_KEY;
 
     if (!apiKey) {
-      console.error('[Gemini] GEMINI_API_KEY environment variable is not set.');
-      this.socket.emit('error', { message: 'Server misconfiguration: missing Gemini API key.' });
+      console.error("[Gemini] GEMINI_API_KEY environment variable is not set.");
+      this.socket.emit("error", {
+        message: "Server misconfiguration: missing Gemini API key.",
+      });
       return;
     }
 
-    const url =
-      `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${apiKey}`;
+    const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${apiKey}`;
 
     this.ws = new WebSocket(url);
 
-    this.ws.on('open', () => this.handleOpen());
-    this.ws.on('message', (data: WebSocket.Data) => this.handleMessage(data));
-    this.ws.on('error', (error: Error) => this.handleError(error));
-    this.ws.on('close', (code: number, reason: Buffer) => this.handleClose(code, reason));
+    this.ws.on("open", () => this.handleOpen());
+    this.ws.on("message", (data: WebSocket.Data) => this.handleMessage(data));
+    this.ws.on("error", (error: Error) => this.handleError(error));
+    this.ws.on("close", (code: number, reason: Buffer) =>
+      this.handleClose(code, reason),
+    );
   }
 
   /**
@@ -198,11 +211,11 @@ export class GeminiRelayService {
       setup: {
         model: GEMINI_MODEL,
         generationConfig: {
-          responseModalities: ['AUDIO'],
+          responseModalities: ["AUDIO"],
           speechConfig: {
             voiceConfig: {
               prebuiltVoiceConfig: {
-                voiceName: 'Puck',
+                voiceName: "Puck",
               },
             },
           },
@@ -214,28 +227,28 @@ export class GeminiRelayService {
           {
             functionDeclarations: [
               {
-                name: 'finalize_intake',
+                name: "finalize_intake",
                 description:
-                  'Called when the intake meeting is complete. Saves the project summary, structured requirements, and client name to the backend.',
+                  "Called when the intake meeting is complete. Saves the project summary, structured requirements, and client name to the backend.",
                 parameters: {
-                  type: 'object',
+                  type: "object",
                   properties: {
                     client_name: {
-                      type: 'string',
-                      description: 'The full name of the client.',
+                      type: "string",
+                      description: "The full name of the client.",
                     },
                     project_summary: {
-                      type: 'string',
+                      type: "string",
                       description:
-                        'A comprehensive summary of the project discussed during the intake meeting.',
+                        "A comprehensive summary of the project discussed during the intake meeting.",
                     },
                     requirements_json: {
-                      type: 'object',
+                      type: "object",
                       description:
-                        'Structured JSON object containing the extracted project requirements, features, and technical specifications.',
+                        "Structured JSON object containing the extracted project requirements, features, and technical specifications.",
                     },
                   },
-                  required: ['project_summary', 'requirements_json'],
+                  required: ["project_summary", "requirements_json"],
                 },
               },
             ],
@@ -261,8 +274,14 @@ export class GeminiRelayService {
     try {
       message = JSON.parse(data.toString()) as GeminiServerMessage;
     } catch (parseError: unknown) {
-      const errorMsg = parseError instanceof Error ? parseError.message : 'Unknown parse error';
-      console.error(`[Gemini] Failed to parse message for session ${this.sessionId}:`, errorMsg);
+      const errorMsg =
+        parseError instanceof Error
+          ? parseError.message
+          : "Unknown parse error";
+      console.error(
+        `[Gemini] Failed to parse message for session ${this.sessionId}:`,
+        errorMsg,
+      );
       return;
     }
 
@@ -291,7 +310,7 @@ export class GeminiRelayService {
         continue;
       }
 
-      this.socket.emit('audio_chunk', {
+      this.socket.emit("audio_chunk", {
         data: part.inlineData.data,
         mimeType: part.inlineData.mimeType,
       });
@@ -306,26 +325,32 @@ export class GeminiRelayService {
    */
   private async handleToolCall(toolCall: GeminiToolCall): Promise<void> {
     for (const call of toolCall.functionCalls) {
-      if (call.name !== 'finalize_intake') {
+      if (call.name !== "finalize_intake") {
         console.warn(`[Gemini] Unknown function call: ${call.name}`);
         continue;
       }
 
-      console.log(`[Gemini] finalize_intake called for session ${this.sessionId}:`, call.args);
+      console.log(
+        `[Gemini] finalize_intake called for session ${this.sessionId}:`,
+        call.args,
+      );
 
       const payload: FinalizePayload = {
         client_name: (call.args.client_name as string) ?? null,
         project_summary: call.args.project_summary as string,
-        requirements_json: (call.args.requirements_json as Record<string, unknown>) ?? {},
+        requirements_json:
+          (call.args.requirements_json as Record<string, unknown>) ?? {},
       };
 
       try {
         await this.laravelClient.finalizeSession(this.sessionId, payload);
 
-        console.log(`[Gemini] Session ${this.sessionId} finalized successfully.`);
+        console.log(
+          `[Gemini] Session ${this.sessionId} finalized successfully.`,
+        );
 
-        this.socket.emit('meeting_finalized', {
-          message: 'Intake meeting has been finalized.',
+        this.socket.emit("meeting_finalized", {
+          message: "Intake meeting has been finalized.",
           session_id: this.sessionId,
         });
 
@@ -334,7 +359,7 @@ export class GeminiRelayService {
             functionResponses: [
               {
                 id: call.id,
-                response: { result: 'success' },
+                response: { result: "success" },
               },
             ],
           },
@@ -344,9 +369,14 @@ export class GeminiRelayService {
         this.close();
       } catch (error: unknown) {
         const errorMsg = LaravelApiClient.formatError(error);
-        console.error(`[Gemini] Failed to finalize session ${this.sessionId}:`, errorMsg);
+        console.error(
+          `[Gemini] Failed to finalize session ${this.sessionId}:`,
+          errorMsg,
+        );
 
-        this.socket.emit('error', { message: `Failed to finalize session: ${errorMsg}` });
+        this.socket.emit("error", {
+          message: `Failed to finalize session: ${errorMsg}`,
+        });
       }
     }
   }
@@ -355,8 +385,13 @@ export class GeminiRelayService {
    * Handles WebSocket errors from the Gemini connection.
    */
   private handleError(error: Error): void {
-    console.error(`[Gemini] WebSocket error for session ${this.sessionId}:`, error.message);
-    this.socket.emit('error', { message: `Gemini connection error: ${error.message}` });
+    console.error(
+      `[Gemini] WebSocket error for session ${this.sessionId}:`,
+      error.message,
+    );
+    this.socket.emit("error", {
+      message: `Gemini connection error: ${error.message}`,
+    });
   }
 
   /**
@@ -364,7 +399,7 @@ export class GeminiRelayService {
    */
   private handleClose(code: number, reason: Buffer): void {
     console.log(
-      `[Gemini] WebSocket closed for session ${this.sessionId} — code: ${code}, reason: ${reason.toString()}`
+      `[Gemini] WebSocket closed for session ${this.sessionId} — code: ${code}, reason: ${reason.toString()}`,
     );
     this.ws = null;
   }
@@ -374,20 +409,56 @@ export class GeminiRelayService {
    *
    * @param audioBase64 - Raw PCM audio data encoded as a base64 string.
    */
-  public sendAudio(audioBase64: string): void {
+  public sendAudio(audioData: unknown): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      console.warn(`[Gemini] Cannot send audio — WebSocket not open for session ${this.sessionId}`);
       return;
+    }
+
+    let base64Audio = "";
+
+    if (typeof audioData === "string") {
+      base64Audio = audioData;
+    } else if (Buffer.isBuffer(audioData)) {
+      base64Audio = audioData.toString("base64");
+    } else if (audioData instanceof ArrayBuffer) {
+      base64Audio = Buffer.from(audioData).toString("base64");
+    } else if (ArrayBuffer.isView(audioData)) {
+      base64Audio = Buffer.from(
+        audioData.buffer,
+        audioData.byteOffset,
+        audioData.byteLength,
+      ).toString("base64");
+    } else if (audioData && typeof audioData === "object") {
+      // ARCHITECT FIX: Safely cast to Record to satisfy strict TypeScript rules
+      const obj = audioData as Record<string, unknown>;
+      const payload =
+        obj.base64 ?? obj.data ?? obj.audio ?? obj.chunk ?? obj.buffer;
+
+      if (typeof payload === "string") {
+        base64Audio = payload;
+      } else if (Buffer.isBuffer(payload)) {
+        base64Audio = payload.toString("base64");
+      } else if (payload instanceof ArrayBuffer) {
+        base64Audio = Buffer.from(payload).toString("base64");
+      } else if (ArrayBuffer.isView(payload)) {
+        base64Audio = Buffer.from(
+          payload.buffer,
+          payload.byteOffset,
+          payload.byteLength,
+        ).toString("base64");
+      }
+    }
+
+    if (!base64Audio) {
+      return; // Silently drop unhandled chunks instead of crashing
     }
 
     const audioMessage: GeminiRealtimeInput = {
       realtimeInput: {
-        mediaChunks: [
-          {
-            mimeType: AUDIO_MIME_TYPE,
-            data: audioBase64,
-          },
-        ],
+        audio: {
+          mimeType: AUDIO_MIME_TYPE,
+          data: base64Audio,
+        },
       },
     };
 
@@ -402,8 +473,11 @@ export class GeminiRelayService {
       return;
     }
 
-    if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
-      this.ws.close(1000, 'Session complete');
+    if (
+      this.ws.readyState === WebSocket.OPEN ||
+      this.ws.readyState === WebSocket.CONNECTING
+    ) {
+      this.ws.close(1000, "Session complete");
     }
 
     this.ws = null;
@@ -414,9 +488,13 @@ export class GeminiRelayService {
    *
    * @param message - The typed message object to send.
    */
-  private send(message: GeminiSetupMessage | GeminiRealtimeInput | GeminiToolResponse): void {
+  private send(
+    message: GeminiSetupMessage | GeminiRealtimeInput | GeminiToolResponse,
+  ): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      console.warn(`[Gemini] Cannot send — WebSocket not open for session ${this.sessionId}`);
+      console.warn(
+        `[Gemini] Cannot send — WebSocket not open for session ${this.sessionId}`,
+      );
       return;
     }
 
@@ -436,19 +514,21 @@ export class GeminiRelayService {
       sections.push(this.context.system_prompt);
     } else {
       sections.push(
-        'You are an AI intake assistant for a software development agency. ' +
-        'Conduct a professional client intake meeting. Ask about the project scope, ' +
-        'requirements, timeline, and budget. When you have gathered enough information, ' +
-        'call the finalize_intake function with a comprehensive summary.'
+        "You are an AI intake assistant for a software development agency. " +
+          "Conduct a professional client intake meeting. Ask about the project scope, " +
+          "requirements, timeline, and budget. When you have gathered enough information, " +
+          "call the finalize_intake function with a comprehensive summary.",
       );
     }
 
     if (this.context.developer_skills) {
-      sections.push(`\n--- Developer Skills & Expertise ---\n${this.context.developer_skills}`);
+      sections.push(
+        `\n--- Developer Skills & Expertise ---\n${this.context.developer_skills}`,
+      );
     }
 
     if (this.context.documents && this.context.documents.length > 0) {
-      sections.push('\n--- Uploaded Documents ---');
+      sections.push("\n--- Uploaded Documents ---");
 
       for (const doc of this.context.documents) {
         if (!doc.extracted_text) {
@@ -459,6 +539,6 @@ export class GeminiRelayService {
       }
     }
 
-    return sections.join('\n');
+    return sections.join("\n");
   }
 }

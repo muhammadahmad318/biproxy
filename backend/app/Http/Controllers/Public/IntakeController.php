@@ -58,4 +58,20 @@ class IntakeController extends Controller
 
         return new IntakeSessionResource($updatedSession);
     }
+
+    /**
+     * Upload a document for the intake session.
+     */
+    public function uploadDocument(
+        \App\Http\Requests\Public\UploadDocumentRequest $request,
+        IntakeSession $session,
+        \App\Actions\UploadIntakeDocumentAction $action,
+    ): \Illuminate\Http\JsonResponse {
+        $action->execute($session, $request->file('document'));
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Document uploaded successfully.',
+        ]);
+    }
 }

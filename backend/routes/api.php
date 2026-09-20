@@ -22,6 +22,7 @@ use Illuminate\Support\Facades\Route;
 Route::prefix('intake/{session}')->group(function () {
     Route::get('/verify', [IntakeController::class, 'verify']);
     Route::post('/approve', [IntakeController::class, 'approve']);
+    Route::post('/documents', [IntakeController::class, 'uploadDocument']);
 });
 
 /*

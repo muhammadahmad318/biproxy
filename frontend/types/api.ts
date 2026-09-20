@@ -1,4 +1,4 @@
-export type SessionStatus = 'pending' | 'active' | 'finalized' | 'completed' | 'cancelled';
+export type SessionStatus = 'pending_approval' | 'active' | 'finalized' | 'approved'|'discarded';
 
 export interface SessionData {
   id: string;
@@ -23,4 +23,12 @@ export interface UploadResponse {
 export interface ApproveResponse {
   success: boolean;
   message: string;
+}
+
+export interface LoginResponse {
+  token: string;
+}
+
+export interface AdminLead extends SessionData {
+  client_email: string | null;
 }
