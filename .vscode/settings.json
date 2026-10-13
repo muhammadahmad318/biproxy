@@ -1,0 +1,7 @@
+{
+    "php.validate.executablePath": "",
+    "debug.javascript.defaultRuntimeExecutable": {
+        "pwa-node": "node"
+    },
+    "terminal.integrated.suggest.windowsExecutableExtensions": {}
+}

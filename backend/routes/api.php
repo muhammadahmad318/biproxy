@@ -19,6 +19,7 @@ use Illuminate\Support\Facades\Route;
 |
 */
 
+Route::post('/intake', [IntakeController::class, 'store']);
 Route::prefix('intake/{session}')->group(function () {
     Route::get('/verify', [IntakeController::class, 'verify']);
     Route::post('/approve', [IntakeController::class, 'approve']);

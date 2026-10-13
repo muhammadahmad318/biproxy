@@ -1,4 +1,4 @@
-export type SessionStatus = 'pending_approval' | 'active' | 'finalized' | 'approved'|'discarded';
+export type SessionStatus = 'pending_approval' | 'active' | 'finalized' | 'approved' | 'discarded';
 
 export interface SessionData {
   id: string;
@@ -18,6 +18,7 @@ export interface AISummary {
 export interface UploadResponse {
   success: boolean;
   message: string;
+  extracted_text: string;
 }
 
 export interface ApproveResponse {

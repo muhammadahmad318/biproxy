@@ -17,22 +17,25 @@ use Symfony\Component\HttpKernel\Exception\UnprocessableEntityHttpException;
 class ApproveIntakeSessionAction
 {
     /**
-     * Execute the approval transition.
+     * Execute the approval transition and save manual edits.
      *
-     * @param IntakeSession $session The session being approved.
-     * @param string        $email   The client's validated email address.
+     * @param IntakeSession $session       The session being approved.
+     * @param array         $validatedData The validated input containing email, summary, and requirements.
      *
      * @return IntakeSession The freshly persisted session instance.
      *
      * @throws UnprocessableEntityHttpException If the session is already finalized.
      */
-    public function execute(IntakeSession $session, string $email): IntakeSession
+    public function execute(IntakeSession $session, array $validatedData): IntakeSession
     {
         if ($session->status !== SessionStatus::ACTIVE && $session->status !== SessionStatus::PENDING_APPROVAL) {
             throw new UnprocessableEntityHttpException('Session is already finalized.');
         }
 
-        $session->client_email = $email;
+        $session->client_email = $validatedData['client_email'];
+        $session->project_summary = $validatedData['project_summary'];
+        $session->requirements_json = $validatedData['requirements_json'];
+
         $session->status = SessionStatus::PENDING_APPROVAL;
         $session->completed_at = now();
 

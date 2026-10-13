@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Http\Controllers\Public;
 
 use App\Actions\ApproveIntakeSessionAction;
+use App\Actions\CreateIntakeSessionAction;
 use App\Enums\SessionStatus;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Public\ApproveIntakeSessionRequest;
@@ -54,7 +55,7 @@ class IntakeController extends Controller
         IntakeSession $session,
         ApproveIntakeSessionAction $action,
     ): IntakeSessionResource {
-        $updatedSession = $action->execute($session, $request->validated('client_email'));
+        $updatedSession = $action->execute($session, $request->validated());
 
         return new IntakeSessionResource($updatedSession);
     }
@@ -67,11 +68,25 @@ class IntakeController extends Controller
         IntakeSession $session,
         \App\Actions\UploadIntakeDocumentAction $action,
     ): \Illuminate\Http\JsonResponse {
-        $action->execute($session, $request->file('document'));
+        $document = $action->execute($session, $request->file('document'));
 
         return response()->json([
             'success' => true,
             'message' => 'Document uploaded successfully.',
+            'extracted_text' => $document->extracted_text, // Inject the parsed text into the response
         ]);
+    }
+
+    /**
+     * Initialize a new intake session.
+     * 
+     * @param CreateIntakeSessionAction $action Injected action handling the creation logic.
+     * @return IntakeSessionResource
+     */
+    public function store(CreateIntakeSessionAction $action): IntakeSessionResource
+    {
+        $session = $action->execute();
+
+        return new IntakeSessionResource($session);
     }
 }

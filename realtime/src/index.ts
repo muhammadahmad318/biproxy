@@ -91,6 +91,21 @@ io.on('connection', async (socket: Socket) => {
     geminiService.sendAudio(data);
   });
 
+
+  /**
+   * Relay text messages and system context from the Next.js client to Gemini.
+   */
+  socket.on('client_text', (payload: { text: string; turnComplete?: boolean }) => {
+    if (!geminiService || !payload || typeof payload.text !== 'string' || !payload.text.trim()) {
+      return;
+    }
+
+    // Default to true if undefined, ensuring backward compatibility
+    const isComplete = payload.turnComplete !== undefined ? payload.turnComplete : true;
+
+    geminiService.sendText(payload.text.trim(), isComplete);
+  });
+
   /**
    * Clean up the Gemini WebSocket when the client disconnects.
    */

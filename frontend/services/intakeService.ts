@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { SessionData, UploadResponse, ApproveResponse } from '../types/api';
+import { SessionData, UploadResponse } from '../types/api';
 
 const apiClient = axios.create({
   baseURL: process.env.NEXT_PUBLIC_LARAVEL_API_URL,
@@ -11,7 +11,7 @@ const apiClient = axios.create({
 
 export const intakeService = {
   verifySession: async (id: string): Promise<SessionData> => {
-    const response = await apiClient.get<SessionData>(`/api/intake/${id}/verify`);
+    const response = await apiClient.get<SessionData>(`/intake/${id}/verify`);
     return response.data;
   },
 
@@ -20,7 +20,7 @@ export const intakeService = {
     formData.append('document', file);
 
     const response = await apiClient.post<UploadResponse>(
-      `/api/intake/${id}/documents`,
+      `/intake/${id}/documents`,
       formData,
       {
         headers: {
@@ -31,10 +31,50 @@ export const intakeService = {
     return response.data;
   },
 
-  approveSession: async (id: string, email: string): Promise<ApproveResponse> => {
-    const response = await apiClient.post<ApproveResponse>(`/api/intake/${id}/approve`, {
-      email,
+
+
+  approveSession: async (
+    sessionId: string,
+    client_email: string,
+    project_summary: string,
+    requirements_json: string
+  ) => {
+
+    // Parse the edited string back into a strict JSON object for Laravel
+    let parsedRequirements = {};
+    try {
+      parsedRequirements = JSON.parse(requirements_json);
+    } catch (e) {
+      throw new Error("Invalid JSON format in requirements. Please check your syntax.");
+    }
+
+    const response = await fetch(`${process.env.NEXT_PUBLIC_LARAVEL_API_URL}/intake/${sessionId}/approve`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify({
+        client_email,
+        project_summary,
+        requirements_json: parsedRequirements,
+      }),
     });
-    return response.data;
+
+    if (!response.ok) {
+      throw new Error('Failed to approve session');
+    }
+
+    return response.json();
   },
+
+  /**
+   * Initializes a new, empty intake session.
+   * 
+   * @returns The newly created session payload containing the UUID.
+   */
+  createSession: async () => {
+    const response = await apiClient.post('/intake');
+    return response.data;
+  }
 };

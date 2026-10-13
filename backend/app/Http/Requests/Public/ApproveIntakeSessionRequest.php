@@ -32,6 +32,8 @@ class ApproveIntakeSessionRequest extends FormRequest
     {
         return [
             'client_email' => ['required', 'string', 'email:rfc,dns', 'max:255'],
+            'project_summary' => ['required', 'string'],
+            'requirements_json' => ['required', 'array'],
         ];
     }
 }

@@ -1,92 +1,164 @@
 "use client";
 
-import { useEffect, useState, use } from "react";
-import { intakeService } from "../../../services/intakeService";
-import { useLiveSession } from "../../../hooks/useLiveSession";
-import { SessionData } from "../../../types/api";
+import { useEffect, useState, use, useRef } from "react";
+import { intakeService } from "@/services/intakeService";
+import { useLiveSession } from "@/hooks/useLiveSession";
+import { SessionData } from "@/types/api";
+import { ParticipantTile } from "@/components/meeting/ParticipantTile";
+import { DynamicIslandControls } from "@/components/meeting/DynamicIslandControls";
+import { HandoffDrawer } from "@/components/meeting/HandoffDrawer";
+import { ChatDrawer } from "@/components/meeting/ChatDrawer";
+import { ConnectionCard } from "@/components/meeting/ConnectionCard";
+import { notify } from "@/utils/toastService";
 
-export default function IntakePage({
-  params,
-}: {
-  params: Promise<{ id: string }>;
-}) {
+export default function IntakePage({ params }: { params: Promise<{ id: string }> }) {
   const unwrappedParams = use(params);
   const { id } = unwrappedParams;
 
+  // Session & Verification State
   const [session, setSession] = useState<SessionData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // UI Interactive States
   const [uploading, setUploading] = useState(false);
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [isSummaryOpen, setIsSummaryOpen] = useState(false);
+  const [pinnedParticipant, setPinnedParticipant] = useState<"ai" | "client" | null>(null);
+
+  // Sign-Off & Approval States
   const [email, setEmail] = useState("");
   const [approvalLoading, setApprovalLoading] = useState(false);
   const [approved, setApproved] = useState(false);
+  const [hasManuallyEnded, setHasManuallyEnded] = useState(false);
 
-  const { connectionState, aiSummary, isSpeaking, startSession } =
-    useLiveSession(id);
-
-  // ARCHITECT FIX: Force a fallback state so the UI never goes blank if the hook delays.
+  const { connectionState, aiSummary, isSpeaking, isMuted, toggleMute, startSession, stopSession, sendTextMessage } = useLiveSession(id);
   const currentState = connectionState || "idle";
+
+  // Load and Verify Intake Session from Laravel Core
   useEffect(() => {
     let isMounted = true;
 
     const fetchSession = async () => {
       try {
         const response = await intakeService.verifySession(id);
+
         if (!isMounted) return;
 
-        // ARCHITECT FIX: ESLint-compliant way to unwrap Laravel's data envelope.
-        // We cast to unknown first, then to a type that optionally contains our SessionData.
         const responseObj = response as unknown as { data?: SessionData };
         const payload = responseObj.data ? responseObj.data : response;
 
         setSession(payload);
 
-        if (
-          payload.status !== "active" &&
-          payload.status !== "pending_approval"
-        ) {
+        if (payload.status !== "active" && payload.status !== "pending_approval") {
           setError("This link is invalid or expired.");
         }
-      } catch (err) {
+      } catch {
         if (isMounted) setError("Invalid or Expired Link.");
       } finally {
         if (isMounted) setLoading(false);
       }
     };
+
     fetchSession();
     return () => {
       isMounted = false;
     };
   }, [id]);
+
+  // ARCHITECT FIX: Autonomously start the WebRTC session once Laravel validates the ID.
+  const hasAutoStarted = useRef(false);
+
+  useEffect(() => {
+    if (session && currentState === "idle" && !hasAutoStarted.current) {
+      hasAutoStarted.current = true;
+
+      const sessionKey = `intake_started_${session.id}`;
+      const hasAlreadyStarted = sessionStorage.getItem(sessionKey);
+
+      if (!hasAlreadyStarted) {
+        // First time entering this specific room from the landing page
+        sessionStorage.setItem(sessionKey, "true");
+        startSession();
+      }
+      // If it HAS already started (meaning this is a page refresh), 
+      // we intentionally do nothing. The UI will remain "idle" and display the resume card.
+    }
+  }, [session, currentState, startSession]);
+
+  const hasDrafted = useRef(false);
+
+  useEffect(() => {
+    if (aiSummary && !hasDrafted.current) {
+      hasDrafted.current = true;
+
+      const timer = setTimeout(() => {
+        setIsChatOpen(false); // Close chat
+        setIsSummaryOpen(true); // Open handoff
+      }, 150);
+
+      return () => clearTimeout(timer);
+    }
+  }, [aiSummary]);
+
+  const handleStartSession = () => {
+    setHasManuallyEnded(false);
+    startSession();
+  };
+
+  const handleEndCall = () => {
+    stopSession();
+    setIsChatOpen(false);
+    setHasManuallyEnded(true);
+  };
+
+
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    // Use a loading toast for the async operation
+    const toastId = notify.loading("Uploading document...", "Extracting context for the AI.");
     setUploading(true);
+
     try {
-      await intakeService.uploadDocument(id, file);
-      alert("File uploaded successfully!");
-    } catch (err) {
-      console.error("Upload failed", err);
-      alert("Failed to upload file.");
+      const response = await intakeService.uploadDocument(id, file);
+
+      if (currentState === "connected" && response.extracted_text) {
+        const systemPrompt = `[SYSTEM AWARENESS]: The user just uploaded a document named "${file.name}". Here is the complete extracted text from the document:\n\n---\n${response.extracted_text}\n---\n\nPlease verbally acknowledge that you received and read the document, and briefly ask if they would like to discuss its specific contents.`;
+        sendTextMessage(systemPrompt, false);
+      }
+
+      // Dismiss loading state and show success
+      notify.dismiss(toastId);
+      notify.success("Document Uploaded", `${file.name} has been processed.`);
+    } catch {
+      notify.dismiss(toastId);
+      notify.error("Upload Failed", "There was an error processing your document.");
     } finally {
       setUploading(false);
     }
   };
 
-  const handleApprove = async () => {
+  const handleApprove = async (editedSummary: string, editedRequirements: string) => {
     if (!email) {
-      alert("Please enter an email address.");
+      notify.warning("Email Required", "Please enter an email address to sign off.");
       return;
     }
+
+    const toastId = notify.loading("Submitting specifications...", "Finalizing your intake room.");
     setApprovalLoading(true);
+
     try {
-      await intakeService.approveSession(id, email);
+      await intakeService.approveSession(id, email, editedSummary, editedRequirements);
       setApproved(true);
-    } catch (err) {
-      console.error("Approval failed", err);
-      alert("Failed to approve session.");
+      stopSession();
+
+      notify.dismiss(toastId);
+      notify.success("Consultation Approved", "Your requirements have been saved.");
+    } catch {
+      notify.dismiss(toastId);
+      notify.error("Approval Failed", "We could not save your specifications.");
     } finally {
       setApprovalLoading(false);
     }
@@ -94,20 +166,20 @@ export default function IntakePage({
 
   if (loading) {
     return (
-      <main className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900">
-        <p className="text-gray-500 animate-pulse">Loading session...</p>
+      <main className="min-h-screen flex items-center justify-center bg-neutral-950 text-neutral-400">
+        <p className="animate-pulse text-sm font-medium">
+          Initializing Virtual Intake Room...
+        </p>
       </main>
     );
   }
 
   if (error || !session) {
     return (
-      <main className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900">
-        <div className="bg-white dark:bg-gray-800 p-8 rounded-xl shadow-lg text-center">
-          <h1 className="text-2xl font-bold text-red-500 mb-2">
-            Access Denied
-          </h1>
-          <p className="text-gray-600 dark:text-gray-300">{error}</p>
+      <main className="min-h-screen flex items-center justify-center bg-neutral-950 p-6">
+        <div className="bg-neutral-900 border border-neutral-800 p-8 rounded-2xl max-w-sm w-full text-center">
+          <h1 className="text-xl font-bold text-red-400 mb-2">Access Denied</h1>
+          <p className="text-sm text-neutral-400">{error}</p>
         </div>
       </main>
     );
@@ -115,11 +187,16 @@ export default function IntakePage({
 
   if (approved) {
     return (
-      <main className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900">
-        <div className="bg-white dark:bg-gray-800 p-8 rounded-xl shadow-lg text-center max-w-md w-full">
-          <h1 className="text-3xl font-bold text-green-500 mb-4">Thank You!</h1>
-          <p className="text-gray-600 dark:text-gray-300">
-            Your consultation has been successfully approved and submitted.
+      <main className="min-h-screen flex items-center justify-center bg-neutral-950 p-6">
+        <div className="bg-neutral-900 border border-neutral-800 p-8 rounded-2xl max-w-md w-full text-center">
+          <div className="w-12 h-12 bg-emerald-500/20 text-emerald-400 rounded-full flex items-center justify-center mx-auto mb-4">
+            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+            </svg>
+          </div>
+          <h1 className="text-2xl font-bold text-neutral-100 mb-2">Submission Confirmed</h1>
+          <p className="text-sm text-neutral-400 leading-relaxed">
+            Your technical intake specifications have been approved and saved to the CRM.
           </p>
         </div>
       </main>
@@ -127,117 +204,122 @@ export default function IntakePage({
   }
 
   return (
-    <main className="min-h-screen flex flex-col bg-gray-50 dark:bg-gray-900 p-6 md:p-12">
-      <header className="mb-12">
-        <h1 className="text-3xl font-bold text-gray-800 dark:text-gray-100">
-          Client Intake Session
-        </h1>
-        <p className="text-gray-500 dark:text-gray-400">
-          {session.client_name
-            ? `Welcome, ${session.client_name}`
-            : "Welcome to your consultation"}
-        </p>
+    // 1. Strict Viewport Height (h-screen)
+    <main className="h-dvh w-full bg-neutral-950 text-neutral-100 flex flex-col overflow-hidden p-4 md:p-6 gap-4">
+
+      {/* 2. HEADER - Fixed Height */}
+      <header className="flex-none flex items-center justify-between px-2 z-10">
+        <div>
+          <h1 className="text-sm font-semibold tracking-tight text-neutral-200">
+            DEVPROXY AI • Virtual Intake Room
+          </h1>
+          <p className="text-xs text-neutral-500">
+            {session.client_name ? `Consultation for ${session.client_name}` : "Discovery Call"}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <span
+            className={`w-2 h-2 rounded-full ${currentState === "connected" ? "bg-emerald-400" : "bg-amber-400 animate-pulse"
+              }`}
+          />
+          <span className="text-xs text-neutral-400 capitalize">{currentState}</span>
+        </div>
       </header>
 
-      <section className="flex-1 flex flex-col max-w-3xl mx-auto w-full gap-8">
-        {currentState === "idle" && (
-          <article className="bg-white dark:bg-gray-800 rounded-2xl p-8 shadow-sm text-center">
-            <h2 className="text-xl font-semibold mb-4 text-gray-800 dark:text-gray-200">
-              Ready to begin?
-            </h2>
-            <button
-              onClick={startSession}
-              className="px-8 py-4 bg-blue-600 hover:bg-blue-700 text-white rounded-full font-medium transition-colors"
-            >
-              Start Consultation
-            </button>
-          </article>
-        )}
+      {/* 3. MIDDLE WORKSPACE - Dynamic Height (flex-1 + min-h-0 prevents overflow) */}
+      <div className="flex-1 flex flex-col lg:flex-row gap-4 max-w-350 mx-auto w-full min-h-0 relative">
 
-        {(currentState === "connecting" || currentState === "connected") && (
-          <article className="bg-white dark:bg-gray-800 rounded-2xl p-8 shadow-sm flex flex-col items-center">
-            <div
-              className={`w-32 h-32 rounded-full mb-6 flex items-center justify-center ${
-                currentState === "connecting"
-                  ? "bg-yellow-100 animate-pulse"
-                  : isSpeaking
-                    ? "bg-blue-100 animate-bounce"
-                    : "bg-green-100"
+        {/* Modal Overlay for Handoff */}
+        <HandoffDrawer
+          isOpen={isSummaryOpen}
+          onClose={() => setIsSummaryOpen(false)}
+          summary={aiSummary}
+          email={email}
+          onEmailChange={setEmail}
+          onApprove={handleApprove}
+          isApproving={approvalLoading}
+        />
+
+        {/* Video Grid */}
+        {currentState === "idle" ? (
+          <section className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4 max-w-7xl mx-auto w-full mb-20">
+
+            <ConnectionCard
+              title={hasManuallyEnded ? "Consultation Ended" : "Resume Consultation"}
+              description={
+                hasManuallyEnded
+                  ? "You have successfully disconnected from the secure room. You can rejoin whenever you are ready."
+                  : "Your session was interrupted or paused. Click below to reconnect your microphone and resume."
+              }
+              buttonText={hasManuallyEnded ? "Rejoin Consultation" : "Resume Session"}
+              onAction={handleStartSession}
+            />
+          </section>
+        ) : (
+          <section
+            className={`flex-1 grid gap-4 transition-all duration-300 ease-in-out min-h-0
+              ${isChatOpen
+                ? 'grid-cols-1 md:grid-cols-2 lg:grid-cols-2 lg:grid-rows-1'
+                : 'grid-cols-1 md:grid-cols-2 md:grid-rows-1'
               }`}
-            >
-              <span
-                className={`text-4xl ${isSpeaking ? "text-blue-600" : "text-green-600"}`}
-              >
-                🎤
-              </span>
-            </div>
-            <p className="text-gray-600 dark:text-gray-300 mb-8 font-medium">
-              {currentState === "connecting"
-                ? "Connecting to AI..."
-                : "Session is live. You can speak now."}
-            </p>
-
-            <div className="w-full border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-xl p-6 text-center hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors">
-              <p className="text-sm text-gray-500 dark:text-gray-400 mb-3">
-                Need to upload a document?
-              </p>
-              <label className="cursor-pointer bg-gray-100 dark:bg-gray-700 px-4 py-2 rounded-lg text-sm font-medium hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors inline-block">
-                {uploading ? "Uploading..." : "Choose File"}
-                <input
-                  type="file"
-                  className="hidden"
-                  onChange={handleFileUpload}
-                  disabled={uploading}
+          >
+            <>
+              {pinnedParticipant !== "client" && (
+                <ParticipantTile
+                  name="DEVPROXY AI"
+                  role="Technical Sales Lead"
+                  initials="AI"
+                  isSpeaking={isSpeaking}
+                  isPinned={pinnedParticipant === "ai"}
+                  onTogglePin={() => setPinnedParticipant((prev) => (prev === "ai" ? null : "ai"))}
+                  accentColor="blue"
                 />
-              </label>
-            </div>
-          </article>
-        )}
+              )}
 
-        {currentState === "finalized" && aiSummary && (
-          <article className="bg-white dark:bg-gray-800 rounded-2xl p-8 shadow-sm">
-            <h2 className="text-2xl font-bold mb-4 text-gray-800 dark:text-gray-100">
-              Project Summary
-            </h2>
-            <div className="bg-gray-50 dark:bg-gray-900 p-6 rounded-lg mb-8">
-              <p className="text-gray-700 dark:text-gray-300 whitespace-pre-wrap">
-                {aiSummary.project_summary}
-              </p>
-            </div>
-
-            <div className="border-t border-gray-200 dark:border-gray-700 pt-8">
-              <h3 className="text-lg font-semibold mb-4 text-gray-800 dark:text-gray-200">
-                Finalize Submission
-              </h3>
-              <div className="flex flex-col sm:flex-row gap-4">
-                <input
-                  type="email"
-                  placeholder="Enter your email address"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="flex-1 px-4 py-3 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              {pinnedParticipant !== "ai" && (
+                <ParticipantTile
+                  name={session.client_name || "Client Attendee"}
+                  role="Lead Client"
+                  initials={session.client_name ? session.client_name.substring(0, 2).toUpperCase() : "ME"}
+                  isSpeaking={!isSpeaking && currentState === "connected" && !isMuted}
+                  isPinned={pinnedParticipant === "client"}
+                  onTogglePin={() => setPinnedParticipant((prev) => (prev === "client" ? null : "client"))}
+                  accentColor="emerald"
                 />
-                <button
-                  onClick={handleApprove}
-                  disabled={approvalLoading}
-                  className="px-6 py-3 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg font-medium transition-colors whitespace-nowrap"
-                >
-                  {approvalLoading ? "Submitting..." : "Approve & Submit"}
-                </button>
-              </div>
-            </div>
-          </article>
+              )}
+            </>
+          </section>
         )}
 
-        {currentState === "error" && (
-          <article className="bg-red-50 dark:bg-red-900/20 rounded-2xl p-8 shadow-sm text-center border border-red-200 dark:border-red-800">
-            <p className="text-red-600 dark:text-red-400 font-medium">
-              A connection error occurred. Please refresh the page and try
-              again.
-            </p>
-          </article>
-        )}
-      </section>
+        {/* Chat Drawer seamlessly locked in the grid */}
+        <ChatDrawer
+          isOpen={isChatOpen}
+          onClose={() => setIsChatOpen(false)}
+          sessionTitle={session.client_name || "Technical Consultation"}
+          onSendMessage={sendTextMessage}
+          isConnected={currentState === "connected"}
+        />
+      </div>
+
+      {/* 4. FOOTER - Fixed Height (Never overlays grid) */}
+      {currentState !== "idle" && (
+        <footer className={`flex-none flex justify-center pb-2 ${isChatOpen ? 'hidden lg:flex' : ''}`}>
+          <DynamicIslandControls
+            isMuted={isMuted}
+            onToggleMic={toggleMute}
+            isUploading={uploading}
+            onUploadFile={handleFileUpload}
+            isChatOpen={isChatOpen}
+            onToggleChat={() => setIsChatOpen((prev) => !prev)}
+            isSummaryOpen={isSummaryOpen}
+            onToggleSummary={() => setIsSummaryOpen((prev) => !prev)}
+            onEndSession={handleEndCall}
+            hasSummary={Boolean(aiSummary)}
+          />
+        </footer>
+      )}
+
+
     </main>
   );
 }

@@ -77,7 +77,19 @@ interface GeminiToolResponse {
 
 interface GeminiFunctionResponse {
   id: string;
+  name: string; // ARCHITECT FIX: Google will terminate the WebSocket if this is missing
   response: Record<string, unknown>;
+}
+
+/** Client content envelope for sending text/context messages to Gemini. */
+interface GeminiClientContent {
+  clientContent: {
+    turns: {
+      role: string;
+      parts: GeminiPart[];
+    }[];
+    turnComplete: boolean;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -229,21 +241,21 @@ export class GeminiRelayService {
               {
                 name: "finalize_intake",
                 description:
-                  "Called when the intake meeting is complete. Saves the project summary, structured requirements, and client name to the backend.",
+                  "Execute this tool AUTONOMOUSLY the moment you have gathered enough requirements from the user. Do not ask for permission.",
                 parameters: {
-                  type: "object",
+                  type: "OBJECT",
                   properties: {
                     client_name: {
-                      type: "string",
+                      type: "STRING",
                       description: "The full name of the client.",
                     },
                     project_summary: {
-                      type: "string",
+                      type: "STRING",
                       description:
                         "A comprehensive summary of the project discussed during the intake meeting.",
                     },
                     requirements_json: {
-                      type: "object",
+                      type: "STRING",
                       description:
                         "Structured JSON object containing the extracted project requirements, features, and technical specifications.",
                     },
@@ -269,6 +281,8 @@ export class GeminiRelayService {
    * - `toolCall`: Executes the function call against Laravel.
    */
   private handleMessage(data: WebSocket.Data): void {
+
+    // console.log(JSON.parse(data.toString()) as GeminiServerMessage)
     let message: GeminiServerMessage;
 
     try {
@@ -284,6 +298,11 @@ export class GeminiRelayService {
       );
       return;
     }
+
+    // console.log("setupComplete : " + message.setupComplete)
+    // console.log("serverContent : ", message?.serverContent?.modelTurn?.parts)
+    // console.log("Message : ", message)
+    console.log("toolCall : ", message.toolCall)
 
     if (message.setupComplete) {
       console.log(`[Gemini] Setup complete for session ${this.sessionId}`);
@@ -325,61 +344,59 @@ export class GeminiRelayService {
    */
   private async handleToolCall(toolCall: GeminiToolCall): Promise<void> {
     for (const call of toolCall.functionCalls) {
-      if (call.name !== "finalize_intake") {
-        console.warn(`[Gemini] Unknown function call: ${call.name}`);
-        continue;
-      }
+      if (call.name !== "finalize_intake") continue;
 
-      console.log(
-        `[Gemini] finalize_intake called for session ${this.sessionId}:`,
-        call.args,
-      );
+      console.log("\n[Gemini] 🚀 Executing finalize_intake tool...");
+      console.log("[Gemini] Raw Arguments from AI:", call.args);
+
+      // ARCHITECT FIX: Aggressively parse requirements_json in case Gemini outputs a string instead of an object
+      let reqJson = call.args.requirements_json;
+      if (typeof reqJson === "string") {
+        try {
+          reqJson = JSON.parse(reqJson);
+        } catch (e) {
+          console.warn("[Gemini] Failed to parse requirements string. Defaulting to raw text.");
+          reqJson = { raw_text: reqJson };
+        }
+      }
 
       const payload: FinalizePayload = {
         client_name: (call.args.client_name as string) ?? null,
-        project_summary: call.args.project_summary as string,
-        requirements_json:
-          (call.args.requirements_json as Record<string, unknown>) ?? {},
+        project_summary: (call.args.project_summary as string) ?? "Summary pending.",
+        requirements_json: (reqJson as Record<string, unknown>) ?? {},
       };
 
       try {
+        // 1. Send to Laravel in the background
         await this.laravelClient.finalizeSession(this.sessionId, payload);
+        console.log("[Gemini] ✅ Successfully saved payload to Laravel.");
 
-        console.log(
-          `[Gemini] Session ${this.sessionId} finalized successfully.`,
-        );
-
+        // 2. Forward the payload instantly to the Next.js frontend
         this.socket.emit("meeting_finalized", {
-          message: "Intake meeting has been finalized.",
+          message: "Intake meeting drafted.",
           session_id: this.sessionId,
+          summaryData: payload
         });
+        console.log("[Gemini] 📡 Beamed payload to frontend.");
 
+        // 3. Tell Gemini it succeeded so it stays on the line and speaks
         const toolResponse: GeminiToolResponse = {
           toolResponse: {
-            functionResponses: [
-              {
-                id: call.id,
-                response: { result: "success" },
-              },
-            ],
+            functionResponses: [{ id: call.id, name: call.name, response: { result: "success" } }],
           },
         };
-
         this.send(toolResponse);
-        this.close();
+
       } catch (error: unknown) {
         const errorMsg = LaravelApiClient.formatError(error);
-        console.error(
-          `[Gemini] Failed to finalize session ${this.sessionId}:`,
-          errorMsg,
-        );
+        console.error(`[Gemini] ❌ Failed to finalize session ${this.sessionId}:`, errorMsg);
 
-        this.socket.emit("error", {
-          message: `Failed to finalize session: ${errorMsg}`,
-        });
+        // Let the frontend know the backend crashed so you aren't left guessing!
+        this.socket.emit("backend_error", { message: errorMsg });
       }
     }
   }
+
 
   /**
    * Handles WebSocket errors from the Gemini connection.
@@ -484,22 +501,50 @@ export class GeminiRelayService {
   }
 
   /**
-   * Serializes and sends a message to the Gemini WebSocket.
-   *
-   * @param message - The typed message object to send.
-   */
+    * Serializes and sends a message to the Gemini WebSocket.
+    *
+    * @param message - The typed message object to send.
+    */
   private send(
-    message: GeminiSetupMessage | GeminiRealtimeInput | GeminiToolResponse,
+    message: GeminiSetupMessage | GeminiRealtimeInput | GeminiToolResponse | GeminiClientContent,
   ): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       console.warn(
-        `[Gemini] Cannot send — WebSocket not open for session ${this.sessionId}`,
+        `[Gemini] Cannot send - WebSocket not open for session ${this.sessionId}`,
       );
       return;
     }
-
     this.ws.send(JSON.stringify(message));
   }
+
+  /**
+   * Sends a text message or system context to Gemini.
+   * Dynamically handles turn completion to prevent modality race conditions.
+   * 
+   * @param text - The text string from the client or system.
+   * @param turnComplete - If false, silently injects context without forcing an instant response.
+   */
+  public sendText(text: string, turnComplete: boolean = true): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    const textMessage: GeminiClientContent = {
+      clientContent: {
+        turns: [
+          {
+            role: "user",
+            parts: [{ text: `[Chat/System Input]: ${text}` }],
+          },
+        ],
+        turnComplete: turnComplete,
+      },
+    };
+
+    this.send(textMessage);
+  }
+
+
 
   /**
    * Builds the system instruction text from the session context.
@@ -514,10 +559,10 @@ export class GeminiRelayService {
       sections.push(this.context.system_prompt);
     } else {
       sections.push(
-        "You are an AI intake assistant for a software development agency. " +
-          "Conduct a professional client intake meeting. Ask about the project scope, " +
-          "requirements, timeline, and budget. When you have gathered enough information, " +
-          "call the finalize_intake function with a comprehensive summary.",
+        "You are an elite AI technical architect conducting a client discovery meeting.\n" +
+        "Your goal is to gather the project scope, tech stack, timeline, and budget.\n" +
+        "CRITICAL BEHAVIORAL RULE: The moment you determine you have gathered all necessary information, you MUST execute the `finalize_intake` function call.\n" +
+        "Do NOT output conversational text like 'I have drafted your proposal' INSTEAD of calling the tool. You MUST physically use the tool to submit the data to the system."
       );
     }
 
